@@ -309,6 +309,10 @@ func timerproc(tb *timersBucket) {
 		tb.sleepUntil = now + delta
 		noteclear(&tb.waitnote)
 		unlock(&tb.lock)
+		// [Performace]: change time precise into ms.
+		if delta < 10e6 {
+			delta = 10e6
+		}
 		notetsleepg(&tb.waitnote, delta)
 	}
 }
