@@ -36,7 +36,8 @@ type timer struct {
 //
 // The current value is a compromise between memory usage and performance
 // that should cover the majority of GOMAXPROCS values used in the wild.
-const timersLen = 64
+// [Performance]: change time bucket into 4.
+const timersLen = 4
 
 // timers contains "per-P" timer heaps.
 //
