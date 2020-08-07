@@ -269,6 +269,10 @@ func Gosched() {
 	mcall(gosched_m)
 }
 
+func SetReduceWakeup(reduce bool) {
+	sched.reduceWakeup = reduce
+}
+
 // goschedguarded yields the processor like gosched, but also checks
 // for forbidden states and opts out of the yield in those cases.
 //go:nosplit
@@ -1983,6 +1987,41 @@ func startm(_p_ *p, spinning bool) {
 	mp.nextp.set(_p_)
 	notewakeup(&mp.park)
 }
+// getRunnableGP calculates runnable Gs and runnable Ps.
+func getRunnableGP() (ng, np uint32) {
+	for _, _p_ := range allp {
+		_ng := _p_.runqtail - _p_.runqhead
+		if _p_.runnext != 0 {
+			_ng++
+		}
+		if _p_.status == _Prunning && _ng > 0 {
+			np++
+		}
+		ng += _ng
+	}
+
+	return
+}
+
+// needWakeup decides if necessary to start anther M. The formula is:
+// ng * (1 << shift) <  np * (1 + 1 << shift). If shift == 1, it means
+// when ng <= np * 3/2, don't wake up another M.
+func needWakeup(shift int) bool {
+	np := uint32(gomaxprocs-1) - atomic.Load(&sched.npidle) - atomic.Load(&sched.nmspinning)
+	// If there are too few P/M running (1 or 2), these Ms may bound to
+	// some special Gs and would still finally wakeup M later. So we wakeup M
+	// immediately if too few Ps are running to reduce schedule latency.
+	if np <= 2 {
+		return true
+	}
+	ng, _ := getRunnableGP()
+	np = np + np << shift
+	ng = ng << shift
+	if (ng <= np) {
+		return false
+	}
+	return true
+}
 
 // Hands off P from syscall or locked M.
 // Always runs without a P, so write barriers are not allowed.
@@ -1992,9 +2031,22 @@ func handoffp(_p_ *p) {
 	// findrunnable would return a G to run on _p_.
 
 	// if it has local work, start it straight away
-	if !runqempty(_p_) || sched.runqsize != 0 {
+	if !runqempty(_p_) {
 		startm(_p_, false)
 		return
+	}
+
+	if sched.runqsize != 0 {
+		if sched.reduceWakeup {
+			// do handoff when runnable Gs < runnable Ps.
+			if ng, np := getRunnableGP(); ng <= np {
+				startm(_p_, false)
+				return
+			}
+		} else {
+			startm(_p_, false)
+			return
+		}
 	}
 	// if it has GC work, start it straight away
 	if gcBlackenEnabled != 0 && gcMarkWorkAvailable(_p_) {
@@ -2043,6 +2095,11 @@ func handoffp(_p_ *p) {
 // Tries to add one more P to execute G's.
 // Called when a G is made runnable (newproc, ready).
 func wakep() {
+	if sched.reduceWakeup {
+		if wakeup := needWakeup(1); wakeup == false {
+			return
+		}
+	}
 	// be conservative about spinning threads
 	if !atomic.Cas(&sched.nmspinning, 0, 1) {
 		return
@@ -2243,6 +2300,28 @@ top:
 	if !_g_.m.spinning {
 		_g_.m.spinning = true
 		atomic.Xadd(&sched.nmspinning, 1)
+	}
+	if sched.reduceWakeup {
+		var (
+			max  uint32
+			maxp *p
+		)
+		for _, _p_ := range allp {
+			num := _p_.runqtail - _p_.runqhead
+			runnext := _p_.runnext
+			if runnext != 0 {
+				num++
+			}
+			if num > 0 && max < num {
+				max = num
+				maxp = _p_
+			}
+		}
+		if maxp != nil {
+			if gp := runqsteal(_p_, maxp, true); gp != nil {
+				return gp, false
+			}
+		}
 	}
 	for i := 0; i < 4; i++ {
 		for enum := stealOrder.start(fastrand()); !enum.done(); enum.next() {

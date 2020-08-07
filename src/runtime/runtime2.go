@@ -625,6 +625,9 @@ type schedt struct {
 	npidle     uint32
 	nmspinning uint32 // See "Worker thread parking/unparking" comment in proc.go.
 
+	// If reduceWakeup is set, we use a more conservative strategy to wake up M.
+	reduceWakeup bool
+
 	// Global runnable queue.
 	runq     gQueue
 	runqsize int32
